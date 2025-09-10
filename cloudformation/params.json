@@ -1,0 +1,13 @@
+[
+  { "ParameterKey": "KeyName", "ParameterValue": "<YOUR_KEY_PAIR_NAME>" },
+  { "ParameterKey": "AdminIp", "ParameterValue": "<YOUR_PUBLIC_IP>/32" },
+  { "ParameterKey": "DBUser", "ParameterValue": "<YOUR_RDS_USERNAME>" },
+  { "ParameterKey": "DBPassword", "ParameterValue": "<YOUR_RDS_PASSWORD>" },
+  { "ParameterKey": "S3Bucket", "ParameterValue": "<YOUR_BUCKET_NAME>" },
+  { "ParameterKey": "S3Key", "ParameterValue": "Todo-Two-Tier.zip" },
+
+  { "ParameterKey": "Phase1TemplateUrl", "ParameterValue": "https://<YOUR_BUCKET_NAME>.s3.<YOUR_REGION>.amazonaws.com/cfn/phase1-networking.yaml" },
+  { "ParameterKey": "Phase2TemplateUrl", "ParameterValue": "https://<YOUR_BUCKET_NAME>.s3.<YOUR_REGION>.amazonaws.com/cfn/phase2-security.yaml" },
+  { "ParameterKey": "Phase3TemplateUrl", "ParameterValue": "https://<YOUR_BUCKET_NAME>.s3.<YOUR_REGION>.amazonaws.com/cfn/phase3-rds.yaml" },
+  { "ParameterKey": "Phase4TemplateUrl", "ParameterValue": "https://<YOUR_BUCKET_NAME>.s3.<YOUR_REGION>.amazonaws.com/cfn/phase4-ec2.yaml" }
+]

@@ -1,0 +1,129 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Phase 3 - RDS MySQL + Bastion Host for TodoApp Two-Tier.
+  Uses existing VPC/subnets from Phase 1 exports and SGs from Phase 2.
+  Bastion user-data installs MySQL client, waits for RDS, and creates DB/table.
+
+Parameters:
+  DBUser:
+    Type: String
+    Default: admin
+    Description: Master username for the RDS database
+
+  DBPassword:
+    Type: String
+    NoEcho: true
+    Description: Master password for the RDS database (must meet RDS requirements)
+
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Existing EC2 KeyPair name for SSH access to the Bastion
+
+  BastionAmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+    Description: Latest Amazon Linux 2023 AMI (resolved via SSM public parameter)
+
+Resources:
+  # Subnet group for RDS (private subnets from Phase 1)
+  RDSDBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: "Private subnets for TodoApp RDS"
+      SubnetIds:
+        - !ImportValue PrivateSubnetAId
+        - !ImportValue PrivateSubnetBId
+      DBSubnetGroupName: TodoAppDBSubnetGroup
+
+  # RDS MySQL (uses DatabaseSG from Phase 2)
+  TodoAppRDS:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      DBInstanceIdentifier: todo-instance
+      DBInstanceClass: db.t3.micro
+      Engine: mysql
+      EngineVersion: 8.0.43
+      AllocatedStorage: 20
+      MaxAllocatedStorage: 100
+      StorageType: gp2
+      MultiAZ: true
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref RDSDBSubnetGroup
+      VPCSecurityGroups:
+        - !ImportValue TodoAppDatabaseSG
+      MasterUsername: !Ref DBUser
+      MasterUserPassword: !Ref DBPassword
+      EnableIAMDatabaseAuthentication: true
+      DeletionProtection: false
+      BackupRetentionPeriod: 7
+      CopyTagsToSnapshot: true
+      Tags:
+        - Key: Name
+          Value: TodoApp-RDS
+
+  # Bastion host in Public Subnet A (uses BastionSG from Phase 2)
+  BastionHost:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - TodoAppRDS
+    Properties:
+      ImageId: !Ref BastionAmiId
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !ImportValue PublicSubnetAId
+      SecurityGroupIds:
+        - !ImportValue TodoAppBastionSG
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            Encrypted: true
+            DeleteOnTermination: true
+      Tags:
+        - Key: Name
+          Value: bastion-connect
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -euxo pipefail
+
+          # 1) Install MySQL client
+          wget -q https://dev.mysql.com/get/mysql80-community-release-el9-1.noarch.rpm
+          dnf install -y mysql80-community-release-el9-1.noarch.rpm
+          rpm --import https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
+          dnf install -y mysql-community-client
+
+          # 2) Wait for RDS to accept connections on 3306
+          RDS_HOST="${TodoAppRDS.Endpoint.Address}"
+          echo "Waiting for RDS at ${TodoAppRDS.Endpoint.Address}:3306 ..."
+          for i in $(seq 1 60); do
+            (echo >/dev/tcp/${TodoAppRDS.Endpoint.Address}/3306) >/dev/null 2>&1 && break
+            sleep 10
+          done
+
+          # 3) Create DB and table idempotently
+          mysql -h "$RDS_HOST" -P 3306 -u "${DBUser}" -p'${DBPassword}' -e \
+            "CREATE DATABASE IF NOT EXISTS TodoAppDB; \
+             CREATE TABLE IF NOT EXISTS TodoAppDB.Tasks ( \
+               id INT AUTO_INCREMENT PRIMARY KEY, \
+               task_name VARCHAR(255) NOT NULL, \
+               task_description TEXT, \
+               due_date DATE NULL, \
+               completed BOOLEAN DEFAULT FALSE \
+             );"
+
+Outputs:
+  TodoAppRDSEndpoint:
+    Description: RDS Endpoint
+    Value: !GetAtt TodoAppRDS.Endpoint.Address
+    Export:
+      Name: TodoAppRDSEndpoint
+
+  BastionInstanceId:
+    Description: Bastion Host Instance ID
+    Value: !Ref BastionHost
+
+  BastionPublicIP:
+    Description: Public IP of the Bastion Host
+    Value: !GetAtt BastionHost.PublicIp

@@ -1,0 +1,105 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Phase 2 - Security Groups for TodoApp Two-Tier Architecture.
+  Defines SGs for ALB, Web Layer, Bastion, and Database Layer.
+
+Parameters:
+  AdminIp:
+    Type: String
+    Description: Your public IPv4 /32 for SSH (e.g., 203.0.113.5/32)
+    AllowedPattern: '^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)/32$'
+
+Resources:
+  ALBSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Application Load Balancer
+      VpcId: !ImportValue TodoAppVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: TodoApp-ALB-SG
+
+  WebServerSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for Web Layer (EC2 app servers)
+      VpcId: !ImportValue TodoAppVPC
+      SecurityGroupIngress:
+        # SSH
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AdminIp
+        # HTTP from ALB only
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSG
+      Tags:
+        - Key: Name
+          Value: TodoApp-Web-Server-SG
+
+  BastionSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for Bastion host (SSH)
+      VpcId: !ImportValue TodoAppVPC
+      SecurityGroupIngress:
+        # SSH
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref AdminIp
+      Tags:
+        - Key: Name
+          Value: TodoApp-Bastion-SG
+
+  DatabaseSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: SG for Database Layer (RDS MySQL)
+      VpcId: !ImportValue TodoAppVPC
+      SecurityGroupIngress:
+        # Allow DB from Web tier
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref WebServerSG
+        # Allow DB from Bastion (admin access)
+        - IpProtocol: tcp
+          FromPort: 3306
+          ToPort: 3306
+          SourceSecurityGroupId: !Ref BastionSG
+      Tags:
+        - Key: Name
+          Value: TodoApp-Database-SG
+
+Outputs:
+  ALBSGId:
+    Description: ALB Security Group ID
+    Value: !Ref ALBSG
+    Export:
+      Name: TodoAppALBSG
+
+  WebserverSGId:
+    Description: Web Server Security Group ID
+    Value: !Ref WebServerSG
+    Export:
+      Name: TodoAppWebServerSG
+
+  BastionSGId:
+    Description: Bastion Security Group ID
+    Value: !Ref BastionSG
+    Export:
+      Name: TodoAppBastionSG
+
+  DatabaseSGId:
+    Description: Database Security Group ID
+    Value: !Ref DatabaseSG
+    Export:
+      Name: TodoAppDatabaseSG

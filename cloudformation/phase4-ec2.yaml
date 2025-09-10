@@ -1,0 +1,406 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Phase 4 - Web App Layer (2 EC2) + ALB for TodoApp Two-Tier.
+
+Parameters:
+  KeyName:
+    Type: AWS::EC2::KeyPair::KeyName
+  S3Bucket:
+    Type: String
+  S3Key:
+    Type: String
+  DBUser:
+    Type: String
+    Default: admin
+  DBPassword:
+    Type: String
+    NoEcho: true
+  WebAmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+
+Resources:
+  WebInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      Path: "/"
+      Policies:
+        - PolicyName: WebS3ReadOnlyZip
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: ["s3:GetObject","s3:ListBucket"]
+                Resource:
+                  - !Sub "arn:aws:s3:::${S3Bucket}"
+                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3Key}"
+
+  WebInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Path: "/"
+      Roles: [ !Ref WebInstanceRole ]
+
+  TodoAppALB:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: TodoApp-ALB
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      SecurityGroups:
+        - !ImportValue TodoAppALBSG
+      Subnets:
+        - !ImportValue PublicSubnetAId
+        - !ImportValue PublicSubnetBId
+
+  TodoAppTG:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: TodoApp-TG
+      TargetType: instance
+      Port: 80
+      Protocol: HTTP
+      VpcId: !ImportValue TodoAppVPC
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Matcher: { HttpCode: '200' }
+      Targets:
+        - Id: !Ref WebServer1
+          Port: 80
+        - Id: !Ref WebServer2
+          Port: 80
+    DependsOn: [ WebServer1, WebServer2 ]
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref TodoAppALB
+      Protocol: HTTP
+      Port: 80
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TodoAppTG
+
+  WebServer1:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref WebInstanceProfile
+      ImageId: !Ref WebAmiId
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !ImportValue PublicSubnetAId
+      SecurityGroupIds: [ !ImportValue TodoAppWebServerSG ]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 8, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      Tags: [ { Key: Name, Value: web-server-1 } ]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euxo pipefail
+            exec > >(tee -a /var/log/user-data.log) 2>&1
+
+            # ---------- Base OS and tooling (avoid curl conflict on AL2023) ----------
+            dnf -y update
+            dnf -y install git unzip xxd tree
+            command -v curl >/dev/null 2>&1 || dnf -y install curl --allowerasing
+            command -v aws >/dev/null 2>&1 || dnf -y install awscli
+
+            # ---------- Node.js 18, PM2, NGINX ----------
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
+            dnf -y install nodejs nginx
+            npm install -g pm2
+            systemctl enable nginx
+
+            # ---------- NGINX config (no-cache for html/js/css, health & proxy) ----------
+            cat > /etc/nginx/nginx.conf <<'NGINX'
+            user nginx;
+            worker_processes auto;
+            error_log /var/log/nginx/error.log;
+            pid /run/nginx.pid;
+
+            events { worker_connections 1024; }
+
+            http {
+              include       /etc/nginx/mime.types;
+              default_type  application/octet-stream;
+              types_hash_max_size 2048;
+              sendfile on;
+              keepalive_timeout 65;
+
+              server {
+                listen 80;
+                server_name _;
+
+                location = /health { return 200 "ok"; add_header Content-Type text/plain; }
+
+                root /home/ec2-user/Todo-Two-Tier/public;
+                index index.html;
+
+                # prevent stale browser cache hiding fixes
+                location ~* \.(?:html|js|css)$ {
+                  add_header Cache-Control "no-store";
+                  try_files $uri $uri/ /index.html;
+                }
+
+                location / { try_files $uri $uri/ /index.html; }
+
+                # API proxy to local Node
+                location /api/ {
+                  proxy_pass http://127.0.0.1:3000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+                }
+                location = /config { proxy_pass http://127.0.0.1:3000/config; }
+                location = /tasks  { proxy_pass http://127.0.0.1:3000/tasks;  }
+                location ^~ /tasks/ { proxy_pass http://127.0.0.1:3000; }
+              }
+            }
+            NGINX
+            systemctl restart nginx
+
+            # ---------- Fetch app ZIP, extract, normalize layout ----------
+            APPDIR="/home/ec2-user/Todo-Two-Tier"
+            mkdir -p "$APPDIR"
+            chown -R ec2-user:ec2-user /home/ec2-user
+            chmod 755 /home/ec2-user "$APPDIR"
+
+            cd /home/ec2-user
+            for i in $(seq 1 5); do
+              aws s3 cp "s3://${S3Bucket}/${S3Key}" ./Todo-Two-Tier.zip && break || sleep 5
+            done
+
+            ZIP="/home/ec2-user/Todo-Two-Tier.zip"
+            TMP="/home/ec2-user/todo_extract"
+            rm -rf "$TMP"; mkdir -p "$TMP"
+            unzip -q -o "$ZIP" -d "$TMP" || true
+            rm -f "$ZIP"
+
+            ROOT="$TMP"
+            TOPDIR_COUNT=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | wc -l)
+            TOPFILE_COUNT=$(find "$TMP" -mindepth 1 -maxdepth 1 -type f | wc -l)
+            if [ "$TOPDIR_COUNT" -eq 1 ] && [ "$TOPFILE_COUNT" -eq 0 ]; then
+              ROOT=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n1)
+            fi
+            cp -a "$ROOT"/. "$APPDIR"/ || true
+            rm -rf "$TMP"
+
+            # ---------- Ensure public dir & .env ----------
+            mkdir -p "$APPDIR/public"
+            chown -R ec2-user:ec2-user "$APPDIR"
+            chmod 755 "$APPDIR/public"
+
+            cat > "$APPDIR/.env" <<EOF
+            DB_HOST="${RdsEndpoint}"
+            DB_USER="${DBUser}"
+            DB_PASSWORD="${DBPassword}"
+            DB_NAME="TodoAppDB"
+            DB_PORT="3306"
+            API_BASE_URL="http://${AlbDNS}"
+            EOF
+            chown ec2-user:ec2-user "$APPDIR/.env"
+
+            # favicon only if missing
+            if [ ! -f "$APPDIR/public/favicon.ico" ]; then
+              echo "000001000100101000000100200068040000160000002800000010000000200000000100200000000000000400000000000000000000000000000000000000000000" > "$APPDIR/public/favicon.hex"
+              xxd -r -p "$APPDIR/public/favicon.hex" "$APPDIR/public/favicon.ico" || true
+              rm -f "$APPDIR/public/favicon.hex"
+              chown ec2-user:ec2-user "$APPDIR/public/favicon.ico"
+            fi
+
+            # ---------- Recursive sanitize of localhost:3000 refs ----------
+            SANLOG="/var/log/user-data-sanitize.log"
+            find "$APPDIR" -type f \( -iname "*.js" -o -iname "*.mjs" -o -iname "*.cjs" -o -iname "*.ts" -o -iname "*.tsx" -o -iname "*.html" -o -iname "*.css" -o -iname "*.json" \) -print0 \
+            | xargs -0 sed -i -E \
+              -e 's#https?://(localhost|127\.0\.0\.1):3000##g' \
+              -e 's#//(localhost|127\.0\.0\.1):3000##g' \
+              -e 's#(localhost|127\.0\.0\.1):3000##g' || true
+            grep -RInE 'localhost:3000|127\.0\.0\.1:3000' "$APPDIR" || true > "$SANLOG" 2>&1 || true
+
+            # ---------- Install deps, ensure PORT and dotenv ----------
+            su - ec2-user -c "cd '$APPDIR' && (npm ci || npm install)"
+            grep -q '^PORT=3000' "$APPDIR/.env" || echo 'PORT=3000' >> "$APPDIR/.env"
+            chown ec2-user:ec2-user "$APPDIR/.env"
+            su - ec2-user -c "cd '$APPDIR' && node -e \"try{require.resolve('dotenv');process.exit(0)}catch(e){process.exit(1)}\" || npm install dotenv --save"
+
+            # ---------- Start with PM2 and wait for port 3000 ----------
+            su - ec2-user -c "cd '$APPDIR' && set -a; source .env; set +a; pm2 start '$APPDIR/index.js' --name todoapp --cwd '$APPDIR' --update-env --time || pm2 restart todoapp"
+            for i in $(seq 1 20); do ss -ltn '( sport = :3000 )' | grep -q ':3000' && break || sleep 2; done
+
+            # quick smoke logs
+            curl -sS http://127.0.0.1:3000/config | head -c 500 > /var/log/todoapp-config-direct.txt || true
+            curl -sS http://localhost/config | head -c 500 > /var/log/todoapp-config-via-nginx.txt || true
+            su - ec2-user -c "pm2 logs todoapp --lines 50 --nostream" > /var/log/todoapp-pm2-tail.txt || true
+
+            # persist pm2
+            su - ec2-user -c "pm2 startup -u ec2-user --hp /home/ec2-user"
+            su - ec2-user -c "pm2 save"
+            systemctl reload nginx
+          - { RdsEndpoint: !ImportValue TodoAppRDSEndpoint, AlbDNS: !GetAtt TodoAppALB.DNSName, DBUser: !Ref DBUser, DBPassword: !Ref DBPassword }
+
+  WebServer2:
+    Type: AWS::EC2::Instance
+    Properties:
+      IamInstanceProfile: !Ref WebInstanceProfile
+      ImageId: !Ref WebAmiId
+      InstanceType: t2.micro
+      KeyName: !Ref KeyName
+      SubnetId: !ImportValue PublicSubnetBId
+      SecurityGroupIds: [ !ImportValue TodoAppWebServerSG ]
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: 8, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      Tags: [ { Key: Name, Value: web-server-2 } ]
+      UserData:
+        Fn::Base64: !Sub
+          - |
+            #!/bin/bash
+            set -euxo pipefail
+            exec > >(tee -a /var/log/user-data.log) 2>&1
+
+            dnf -y update
+            dnf -y install git unzip xxd tree
+            command -v curl >/dev/null 2>&1 || dnf -y install curl --allowerasing
+            command -v aws >/dev/null 2>&1 || dnf -y install awscli
+
+            curl -fsSL https://rpm.nodesource.com/setup_18.x | bash -
+            dnf -y install nodejs nginx
+            npm install -g pm2
+            systemctl enable nginx
+
+            cat > /etc/nginx/nginx.conf <<'NGINX'
+            user nginx;
+            worker_processes auto;
+            error_log /var/log/nginx/error.log;
+            pid /run/nginx.pid;
+
+            events { worker_connections 1024; }
+
+            http {
+              include       /etc/nginx/mime.types;
+              default_type  application/octet-stream;
+              types_hash_max_size 2048;
+              sendfile on;
+              keepalive_timeout 65;
+
+              server {
+                listen 80;
+                server_name _;
+
+                location = /health { return 200 "ok"; add_header Content-Type text/plain; }
+
+                root /home/ec2-user/Todo-Two-Tier/public;
+                index index.html;
+
+                location ~* \.(?:html|js|css)$ {
+                  add_header Cache-Control "no-store";
+                  try_files $uri $uri/ /index.html;
+                }
+                location / { try_files $uri $uri/ /index.html; }
+
+                location /api/ {
+                  proxy_pass http://127.0.0.1:3000;
+                  proxy_http_version 1.1;
+                  proxy_set_header Upgrade $http_upgrade;
+                  proxy_set_header Connection "upgrade";
+                  proxy_set_header Host $host;
+                  proxy_cache_bypass $http_upgrade;
+                }
+                location = /config { proxy_pass http://127.0.0.1:3000/config; }
+                location = /tasks  { proxy_pass http://127.0.0.1:3000/tasks;  }
+                location ^~ /tasks/ { proxy_pass http://127.0.0.1:3000; }
+              }
+            }
+            NGINX
+            systemctl restart nginx
+
+            APPDIR="/home/ec2-user/Todo-Two-Tier"
+            mkdir -p "$APPDIR"
+            chown -R ec2-user:ec2-user /home/ec2-user
+            chmod 755 /home/ec2-user "$APPDIR"
+
+            cd /home/ec2-user
+            for i in $(seq 1 5); do
+              aws s3 cp "s3://${S3Bucket}/${S3Key}" ./Todo-Two-Tier.zip && break || sleep 5
+            done
+
+            ZIP="/home/ec2-user/Todo-Two-Tier.zip"
+            TMP="/home/ec2-user/todo_extract"
+            rm -rf "$TMP"; mkdir -p "$TMP"
+            unzip -q -o "$ZIP" -d "$TMP" || true
+            rm -f "$ZIP"
+
+            ROOT="$TMP"
+            TOPDIR_COUNT=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | wc -l)
+            TOPFILE_COUNT=$(find "$TMP" -mindepth 1 -maxdepth 1 -type f | wc -l)
+            if [ "$TOPDIR_COUNT" -eq 1 ] && [ "$TOPFILE_COUNT" -eq 0 ]; then
+              ROOT=$(find "$TMP" -mindepth 1 -maxdepth 1 -type d | head -n1)
+            fi
+            cp -a "$ROOT"/. "$APPDIR"/ || true
+            rm -rf "$TMP"
+
+            mkdir -p "$APPDIR/public"
+            chown -R ec2-user:ec2-user "$APPDIR"
+            chmod 755 "$APPDIR/public"
+
+            cat > "$APPDIR/.env" <<EOF
+            DB_HOST="${RdsEndpoint}"
+            DB_USER="${DBUser}"
+            DB_PASSWORD="${DBPassword}"
+            DB_NAME="TodoAppDB"
+            DB_PORT="3306"
+            API_BASE_URL="http://${AlbDNS}"
+            EOF
+            chown ec2-user:ec2-user "$APPDIR/.env"
+
+            SANLOG="/var/log/user-data-sanitize.log"
+            find "$APPDIR" -type f \( -iname "*.js" -o -iname "*.mjs" -o -iname "*.cjs" -o -iname "*.ts" -o -iname "*.tsx" -o -iname "*.html" -o -iname "*.css" -o -iname "*.json" \) -print0 \
+            | xargs -0 sed -i -E \
+              -e 's#https?://(localhost|127\.0\.0\.1):3000##g' \
+              -e 's#//(localhost|127\.0\.0\.1):3000##g' \
+              -e 's#(localhost|127\.0\.0\.1):3000##g' || true
+            grep -RInE 'localhost:3000|127\.0\.0\.1:3000' "$APPDIR" || true > "$SANLOG" 2>&1 || true
+
+            su - ec2-user -c "cd '$APPDIR' && (npm ci || npm install)"
+            grep -q '^PORT=3000' "$APPDIR/.env" || echo 'PORT=3000' >> "$APPDIR/.env"
+            chown ec2-user:ec2-user "$APPDIR/.env"
+            su - ec2-user -c "cd '$APPDIR' && node -e \"try{require.resolve('dotenv');process.exit(0)}catch(e){process.exit(1)}\" || npm install dotenv --save"
+
+            su - ec2-user -c "cd '$APPDIR' && set -a; source .env; set +a; pm2 start '$APPDIR/index.js' --name todoapp --cwd '$APPDIR' --update-env --time || pm2 restart todoapp"
+            for i in $(seq 1 20); do ss -ltn '( sport = :3000 )' | grep -q ':3000' && break || sleep 2; done
+
+            curl -sS http://127.0.0.1:3000/config | head -c 500 > /var/log/todoapp-config-direct.txt || true
+            curl -sS http://localhost/config | head -c 500 > /var/log/todoapp-config-via-nginx.txt || true
+            su - ec2-user -c "pm2 logs todoapp --lines 50 --nostream" > /var/log/todoapp-pm2-tail.txt || true
+
+            su - ec2-user -c "pm2 startup -u ec2-user --hp /home/ec2-user"
+            su - ec2-user -c "pm2 save"
+            systemctl reload nginx
+          - { RdsEndpoint: !ImportValue TodoAppRDSEndpoint, AlbDNS: !GetAtt TodoAppALB.DNSName, DBUser: !Ref DBUser, DBPassword: !Ref DBPassword }
+
+Outputs:
+  ALBDNSName:
+    Description: Public DNS of the Application Load Balancer
+    Value: !GetAtt TodoAppALB.DNSName
+    Export: { Name: TodoAppALBDNS }
+  WebServer1PublicIP:
+    Description: Public IP of web-server-1
+    Value: !GetAtt WebServer1.PublicIp
+  WebServer2PublicIP:
+    Description: Public IP of web-server-2
+    Value: !GetAtt WebServer2.PublicIp
