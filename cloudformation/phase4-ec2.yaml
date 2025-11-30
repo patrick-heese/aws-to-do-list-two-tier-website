@@ -11,9 +11,9 @@ Parameters:
   DBUser:
     Type: String
     Default: admin
-  DBPassword:
+  DBPasswordParameterName:
     Type: String
-    NoEcho: true
+    Default: /todoapp/db/master_password
   WebAmiId:
     Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
     Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
@@ -37,8 +37,8 @@ Resources:
               - Effect: Allow
                 Action: ["s3:GetObject","s3:ListBucket"]
                 Resource:
-                  - !Sub "arn:aws:s3:::${S3Bucket}"
-                  - !Sub "arn:aws:s3:::${S3Bucket}/${S3Key}"
+                  - !Sub "arn:${AWS::Partition}:s3:::${S3Bucket}"
+                  - !Sub "arn:${AWS::Partition}:s3:::${S3Bucket}/${S3Key}"
 
   WebInstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -80,7 +80,6 @@ Resources:
           Port: 80
         - Id: !Ref WebServer2
           Port: 80
-    DependsOn: [ WebServer1, WebServer2 ]
 
   HttpListener:
     Type: AWS::ElasticLoadBalancingV2::Listener
@@ -208,7 +207,7 @@ Resources:
             cat > "$APPDIR/.env" <<EOF
             DB_HOST="${RdsEndpoint}"
             DB_USER="${DBUser}"
-            DB_PASSWORD="${DBPassword}"
+            DB_PASSWORD="{{resolve:ssm-secure:${DBPasswordParameterName}:1}}"
             DB_NAME="TodoAppDB"
             DB_PORT="3306"
             API_BASE_URL="http://${AlbDNS}"
@@ -251,7 +250,7 @@ Resources:
             su - ec2-user -c "pm2 startup -u ec2-user --hp /home/ec2-user"
             su - ec2-user -c "pm2 save"
             systemctl reload nginx
-          - { RdsEndpoint: !ImportValue TodoAppRDSEndpoint, AlbDNS: !GetAtt TodoAppALB.DNSName, DBUser: !Ref DBUser, DBPassword: !Ref DBPassword }
+          - { RdsEndpoint: !ImportValue TodoAppRDSEndpoint, AlbDNS: !GetAtt TodoAppALB.DNSName, DBUser: !Ref DBUser, DBPasswordParameterName: !Ref DBPasswordParameterName }
 
   WebServer2:
     Type: AWS::EC2::Instance
@@ -361,7 +360,7 @@ Resources:
             cat > "$APPDIR/.env" <<EOF
             DB_HOST="${RdsEndpoint}"
             DB_USER="${DBUser}"
-            DB_PASSWORD="${DBPassword}"
+            DB_PASSWORD="{{resolve:ssm-secure:${DBPasswordParameterName}:1}}"
             DB_NAME="TodoAppDB"
             DB_PORT="3306"
             API_BASE_URL="http://${AlbDNS}"
@@ -391,7 +390,7 @@ Resources:
             su - ec2-user -c "pm2 startup -u ec2-user --hp /home/ec2-user"
             su - ec2-user -c "pm2 save"
             systemctl reload nginx
-          - { RdsEndpoint: !ImportValue TodoAppRDSEndpoint, AlbDNS: !GetAtt TodoAppALB.DNSName, DBUser: !Ref DBUser, DBPassword: !Ref DBPassword }
+          - { RdsEndpoint: !ImportValue TodoAppRDSEndpoint, AlbDNS: !GetAtt TodoAppALB.DNSName, DBUser: !Ref DBUser, DBPasswordParameterName: !Ref DBPasswordParameterName }
 
 Outputs:
   ALBDNSName:

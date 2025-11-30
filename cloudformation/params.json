@@ -2,7 +2,7 @@
   { "ParameterKey": "KeyName", "ParameterValue": "<YOUR_KEY_PAIR_NAME>" },
   { "ParameterKey": "AdminIp", "ParameterValue": "<YOUR_PUBLIC_IP>/32" },
   { "ParameterKey": "DBUser", "ParameterValue": "<YOUR_RDS_USERNAME>" },
-  { "ParameterKey": "DBPassword", "ParameterValue": "<YOUR_RDS_PASSWORD>" },
+  { "ParameterKey": "DBPasswordParameterName", "ParameterValue": "<YOUR_SSM_SECURESTRING_PARAMETER_WITH_DB_PASSWORD>" },
   { "ParameterKey": "S3Bucket", "ParameterValue": "<YOUR_BUCKET_NAME>" },
   { "ParameterKey": "S3Key", "ParameterValue": "Todo-Two-Tier.zip" },
 

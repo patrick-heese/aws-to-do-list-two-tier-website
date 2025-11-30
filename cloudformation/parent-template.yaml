@@ -13,10 +13,10 @@ Parameters:
     Type: String
     Default: admin
     Description: RDS master username
-  DBPassword:
+  DBPasswordParameterName:
     Type: String
-    NoEcho: true
-    Description: RDS master password
+    Default: /todoapp/db/master_password
+    Description: Name of SSM SecureString parameter that stores the RDS master password
   S3Bucket:
     Type: String
     Description: Bucket that holds Todo-Two-Tier.zip
@@ -56,6 +56,8 @@ Parameters:
 Resources:
   Phase1:
     Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       TemplateURL: !Ref Phase1TemplateUrl
       Parameters:
@@ -64,27 +66,42 @@ Resources:
         PrivateSubnetACidr: !Ref PrivateSubnetACidr
         PublicSubnetBCidr: !Ref PublicSubnetBCidr
         PrivateSubnetBCidr: !Ref PrivateSubnetBCidr
+      Tags:
+        - Key: Project
+          Value: aws-to-do-list-two-tier-website
 
   Phase2:
     Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     DependsOn: Phase1
     Properties:
       TemplateURL: !Ref Phase2TemplateUrl
       Parameters:
         AdminIp: !Ref AdminIp
+      Tags:
+        - Key: Project
+          Value: aws-to-do-list-two-tier-website
 
   Phase3:
     Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     DependsOn: Phase2
     Properties:
       TemplateURL: !Ref Phase3TemplateUrl
       Parameters:
         DBUser: !Ref DBUser
-        DBPassword: !Ref DBPassword
+        DBPasswordParameterName: !Ref DBPasswordParameterName
         KeyName: !Ref KeyName
+      Tags:
+        - Key: Project
+          Value: aws-to-do-list-two-tier-website
 
   Phase4:
     Type: AWS::CloudFormation::Stack
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     DependsOn: Phase3
     Properties:
       TemplateURL: !Ref Phase4TemplateUrl
@@ -93,7 +110,10 @@ Resources:
         S3Bucket: !Ref S3Bucket
         S3Key: !Ref S3Key
         DBUser: !Ref DBUser
-        DBPassword: !Ref DBPassword
+        DBPasswordParameterName: !Ref DBPasswordParameterName
+      Tags:
+        - Key: Project
+          Value: aws-to-do-list-two-tier-website
 
 Outputs:
   ALBDNSName:

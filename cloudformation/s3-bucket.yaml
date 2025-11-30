@@ -48,13 +48,13 @@ Resources:
               - s3:GetObject
               - s3:GetBucketLocation
             Resource:
-              - !Sub "arn:aws:s3:::${BucketName}"
-              - !Sub "arn:aws:s3:::${BucketName}/cfn/*"
+              - !Sub "arn:${AWS::Partition}:s3:::${BucketName}"
+              - !Sub "arn:${AWS::Partition}:s3:::${BucketName}/cfn/*"
             Condition:
               StringEquals:
                 aws:SourceAccount: !Ref AccountId
               ArnLike:
-                aws:SourceArn: !Sub "arn:aws:cloudformation:${Region}:${AccountId}:stack/*"
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:cloudformation:${Region}:${AccountId}:stack/*"
 
 Outputs:
   BucketName:

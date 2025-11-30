@@ -10,10 +10,10 @@ Parameters:
     Default: admin
     Description: Master username for the RDS database
 
-  DBPassword:
+  DBPasswordParameterName:
     Type: String
-    NoEcho: true
-    Description: Master password for the RDS database (must meet RDS requirements)
+    Default: /todoapp/db/master_password 
+    Description: Name of SSM SecureString parameter that stores the DB master password
 
   KeyName:
     Type: AWS::EC2::KeyPair::KeyName
@@ -38,6 +38,8 @@ Resources:
   # RDS MySQL (uses DatabaseSG from Phase 2)
   TodoAppRDS:
     Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
     Properties:
       DBInstanceIdentifier: todo-instance
       DBInstanceClass: db.t3.micro
@@ -52,7 +54,7 @@ Resources:
       VPCSecurityGroups:
         - !ImportValue TodoAppDatabaseSG
       MasterUsername: !Ref DBUser
-      MasterUserPassword: !Ref DBPassword
+      MasterUserPassword: !Sub "{{resolve:ssm-secure:${DBPasswordParameterName}:1}}"
       EnableIAMDatabaseAuthentication: true
       DeletionProtection: false
       BackupRetentionPeriod: 7
@@ -64,8 +66,6 @@ Resources:
   # Bastion host in Public Subnet A (uses BastionSG from Phase 2)
   BastionHost:
     Type: AWS::EC2::Instance
-    DependsOn:
-      - TodoAppRDS
     Properties:
       ImageId: !Ref BastionAmiId
       InstanceType: t2.micro
@@ -103,7 +103,7 @@ Resources:
           done
 
           # 3) Create DB and table idempotently
-          mysql -h "$RDS_HOST" -P 3306 -u "${DBUser}" -p'${DBPassword}' -e \
+          mysql -h "$RDS_HOST" -P 3306 -u "${DBUser}" -p'{{resolve:ssm-secure:${DBPasswordParameterName}:1}}' -e \
             "CREATE DATABASE IF NOT EXISTS TodoAppDB; \
              CREATE TABLE IF NOT EXISTS TodoAppDB.Tasks ( \
                id INT AUTO_INCREMENT PRIMARY KEY, \
